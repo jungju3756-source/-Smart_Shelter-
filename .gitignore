@@ -1,0 +1,24 @@
+# 크랙 실행파일 제외
+*.exe
+*.cracked
+
+# Arduino 빌드 캐시
+build/
+*.elf
+*.bin
+*.hex
+*.map
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Claude Code 로컬 설정
+.claude/settings.local.json
+
+# OS 파일
+.DS_Store
+Thumbs.db
