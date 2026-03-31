@@ -201,7 +201,7 @@ def main():
     print("종료하려면 'q' 키를 누르세요\n")
 
     frame_count = 0
-    detection_log_interval = 30  # 30프레임마다 로깅
+    detection_log_interval = 5  # 5프레임마다 로깅 (저FPS 환경 대응)
 
     try:
         while True:
@@ -223,13 +223,16 @@ def main():
             # FPS 업데이트
             detector.update_fps()
 
-            # 주기적 로깅
+            # 주기적 로깅 및 modbus_controller로 신호 전송
             frame_count += 1
             if frame_count % detection_log_interval == 0:
                 detector.log_detection(person_detected, person_count, confidence)
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] "
                       f"{'✓ 사람 감지' if person_detected else '✗ 감지 안됨'} | "
-                      f"수: {person_count} | 신뢰도: {confidence:.2f}")
+                      f"수: {person_count} | 신뢰도: {confidence:.2f}",
+                      file=sys.stderr)
+                # modbus_controller.py로 신호 전송 (stdout)
+                print("PERSON" if person_detected else "EMPTY", flush=True)
 
             # 감지된 경우 프레임 저장
             if person_detected:

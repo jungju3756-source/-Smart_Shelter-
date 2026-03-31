@@ -1,15 +1,19 @@
 // RP2040 Modbus RTU 슬레이브 (USB Serial 버전)
 // USB (COM6)으로 Modbus RTU 직렬 통신
+// 태양광 모듈 시뮬레이션: 전압(23~24V), 전류(1~2A)
 // Function 3: Read Holding Registers 지원
 
 #include <Arduino.h>
 
-// ===== 센서 데이터 변수 (시뮬레이션용) =====
-float temperature = 25.5;      // 온도 (Celsius)
-float humidity = 60.0;          // 습도 (%)
-int co2_level = 450;            // CO2 농도 (ppm)
+// ===== 태양광 시뮬레이션 데이터 =====
+float voltage = 23.5;   // 전압 (V), 범위: 23.0~24.0
+float current = 1.5;    // 전류 (A), 범위: 1.0~2.0
 
 // Modbus Holding Registers 배열
+// Register 0: 전압 (×100, 예: 2350 = 23.50V)
+// Register 1: 전류 (×100, 예: 150 = 1.50A)
+// Register 2: 상태 플래그 (1=정상)
+// Register 3: 업데이트 카운터
 uint16_t holdingRegisters[10] = {0};
 
 // 통신 설정
@@ -41,21 +45,14 @@ void setup() {
 }
 
 void loop() {
-  // ===== 센서 데이터 시뮬레이션 업데이트 =====
-  updateSensorData();
+  // ===== 태양광 데이터 시뮬레이션 업데이트 =====
+  updateSolarData();
 
   // ===== Holding Registers 업데이트 =====
-  // Register 0: 온도 (×100, 예: 2550 = 25.50°C)
-  // Register 1: 습도 (×10, 예: 600 = 60.0%)
-  // Register 2: CO2 (ppm)
-  // Register 3: 상태 플래그 (1=정상)
-  // Register 4: 업데이트 카운터
-
-  holdingRegisters[0] = (uint16_t)(temperature * 100);
-  holdingRegisters[1] = (uint16_t)(humidity * 10);
-  holdingRegisters[2] = (uint16_t)co2_level;
-  holdingRegisters[3] = 1;  // 상태: 1 = 정상
-  holdingRegisters[4]++;    // 카운터 증가
+  holdingRegisters[0] = (uint16_t)(voltage * 100);   // 전압 ×100
+  holdingRegisters[1] = (uint16_t)(current * 100);   // 전류 ×100
+  holdingRegisters[2] = 1;                            // 상태: 1 = 정상
+  holdingRegisters[3]++;                              // 카운터 증가
 
   // ===== Modbus RTU 요청 수신 =====
   while (Serial.available()) {
@@ -69,22 +66,22 @@ void loop() {
     }
   }
 
-  // ===== 프레임 완료 감지 및 처리 (Serial.available() 밖에서 체크) =====
+  // ===== 프레임 완료 감지 및 처리 =====
   if (rxIndex >= 8 && millis() - lastRxTime > 10) {
     processModbusRequest();
     rxIndex = 0;
   }
 
-  // ===== 디버깅 출력 (Modbus 응답 없을 때만, 1초마다) =====
+  // ===== 디버깅 출력 (1초마다) =====
   static unsigned long lastPrint = 0;
   if (rxIndex == 0 && millis() - lastPrint >= 1000) {
     lastPrint = millis();
-    printSensorData();
+    printSolarData();
   }
 
   // 타임아웃 처리
   if (rxIndex > 0 && millis() - lastRxTime > MODBUS_TIMEOUT) {
-    rxIndex = 0;  // 버퍼 초기화
+    rxIndex = 0;
   }
 
   delay(5);
@@ -95,19 +92,14 @@ void processModbusRequest() {
   byte slaveID = rxBuffer[0];
   byte function = rxBuffer[1];
 
-  // Slave ID 확인
   if (slaveID != SLAVE_ID) {
     return;
   }
 
-  // Function 3: Read Holding Registers
   if (function == 0x03) {
     uint16_t startAddr = (rxBuffer[2] << 8) | rxBuffer[3];
-    uint16_t quantity = (rxBuffer[4] << 8) | rxBuffer[5];
+    uint16_t quantity  = (rxBuffer[4] << 8) | rxBuffer[5];
 
-    // CRC 확인 (간단화: 생략)
-
-    // 응답 프레임 생성
     byte txBuffer[32];
     int txIndex = 0;
 
@@ -115,19 +107,16 @@ void processModbusRequest() {
     txBuffer[txIndex++] = function;
     txBuffer[txIndex++] = quantity * 2;  // Byte count
 
-    // 레지스터 값 추가
     for (int i = 0; i < quantity && (startAddr + i) < 10; i++) {
       uint16_t regValue = holdingRegisters[startAddr + i];
       txBuffer[txIndex++] = (regValue >> 8) & 0xFF;
       txBuffer[txIndex++] = regValue & 0xFF;
     }
 
-    // CRC 계산 및 추가
     uint16_t crc = calculateCRC(txBuffer, txIndex);
     txBuffer[txIndex++] = crc & 0xFF;
     txBuffer[txIndex++] = (crc >> 8) & 0xFF;
 
-    // 응답 전송
     Serial.write(txBuffer, txIndex);
     Serial.flush();
 
@@ -141,7 +130,6 @@ void processModbusRequest() {
 // ===== CRC-16 계산 =====
 uint16_t calculateCRC(byte* data, int len) {
   uint16_t crc = 0xFFFF;
-
   for (int i = 0; i < len; i++) {
     crc ^= data[i];
     for (int j = 0; j < 8; j++) {
@@ -152,40 +140,31 @@ uint16_t calculateCRC(byte* data, int len) {
       }
     }
   }
-
   return crc;
 }
 
-// ===== 센서 데이터 업데이트 함수 (시뮬레이션) =====
-void updateSensorData() {
-  // 온도: 25~30°C 변동
-  static float tempTrend = 0.1;
-  temperature += tempTrend;
-  if (temperature > 30.0) tempTrend = -0.1;
-  if (temperature < 25.0) tempTrend = 0.1;
+// ===== 태양광 데이터 시뮬레이션 =====
+void updateSolarData() {
+  // 전압: 23.0~24.0V 변동
+  static float voltageTrend = 0.05;
+  voltage += voltageTrend;
+  if (voltage > 24.0) voltageTrend = -0.05;
+  if (voltage < 23.0) voltageTrend =  0.05;
 
-  // 습도: 40~70% 변동
-  static float humidityTrend = 0.5;
-  humidity += humidityTrend;
-  if (humidity > 70.0) humidityTrend = -0.5;
-  if (humidity < 40.0) humidityTrend = 0.5;
-
-  // CO2: 400~600 ppm 변동
-  static int co2Trend = 5;
-  co2_level += co2Trend;
-  if (co2_level > 600) co2Trend = -5;
-  if (co2_level < 400) co2Trend = 5;
+  // 전류: 1.0~2.0A 변동
+  static float currentTrend = 0.05;
+  current += currentTrend;
+  if (current > 2.0) currentTrend = -0.05;
+  if (current < 1.0) currentTrend =  0.05;
 }
 
-// ===== 디버깅 출력 함수 =====
-void printSensorData() {
-  Serial.print("📊 [Slave #1] ");
-  Serial.print("온도: ");
-  Serial.print(temperature, 2);
-  Serial.print("°C | 습도: ");
-  Serial.print(humidity, 1);
-  Serial.print("% | CO2: ");
-  Serial.print(co2_level);
-  Serial.print(" ppm | 카운터: ");
-  Serial.println(holdingRegisters[4]);
+// ===== 디버깅 출력 =====
+void printSolarData() {
+  Serial.print("[Slave #1] ");
+  Serial.print("전압: ");
+  Serial.print(voltage, 2);
+  Serial.print("V | 전류: ");
+  Serial.print(current, 2);
+  Serial.print("A | 카운터: ");
+  Serial.println(holdingRegisters[3]);
 }

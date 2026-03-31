@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-YOLO 감지 결과 + Modbus 에어컨 제어
-- YOLO에서 사람 감지 결과 수신
-- 감지 상태에 따라 에어컨 ON/OFF 제어
-- Modbus RTU를 통해 RP2040 #2로 제어 명령 전송
+YOLO 감지 결과 → RP2040 #2 LED 제어
+- 사람 감지 시 Modbus FC5 Coil ON → LED ON (에어컨 가동)
+- 300초 동안 사람 미감지 시 Coil OFF → LED OFF (에어컨 정지)
+- 통신: USB-RS485 어댑터 → /dev/ttyUSB0 → RP2040 #2
 """
 
 import serial
@@ -15,57 +15,45 @@ import sys
 import os
 
 # ===== 설정 =====
-# Modbus 연결 설정
-MODBUS_PORT = '/dev/ttyUSB0'  # Zorin OS 직렬 포트 (USB-RS485 어댑터)
-MODBUS_BAUD = 9600
-SLAVE_ID = 1  # RP2040 #2 (마스터가 아니라 슬레이브로 설정 필요)
+MODBUS_PORT  = '/dev/ttyACM1'   # USB-RS485 어댑터 포트
+MODBUS_BAUD  = 9600
+SLAVE_ID     = 1                # RP2040 #2 Slave ID
+LED_COIL_ADDRESS  = 0           # Coil 0: LED (에어컨 코일 시뮬레이션)
+NO_PERSON_TIMEOUT = 5          # 사람 없음 유지 시 OFF까지 대기 시간 (초) - 테스트용
 
-# 에어컨 제어 설정
-AIRCOND_COIL_ADDRESS = 0  # Coil 0: 에어컨 ON/OFF
-NO_PERSON_TIMEOUT = 300   # 사람이 없을 때 몇 초 후 에어컨 OFF (초)
-DEBOUNCE_DELAY = 5        # 상태 변경 확인 지연 (초)
-
-# ===== 로깅 =====
-LOG_DIR = './modbus_logs'
+LOG_DIR = os.path.expanduser('~/smart_shelter/logs')
 os.makedirs(LOG_DIR, exist_ok=True)
 
 
-class AircondController:
-    """에어컨 Modbus 제어 클래스"""
+class LEDController:
+    """RP2040 #2 LED Modbus 제어 클래스"""
 
-    def __init__(self, port=MODBUS_PORT, baudrate=MODBUS_BAUD):
-        """초기화"""
-        self.port = port
-        self.baudrate = baudrate
+    def __init__(self):
         self.serial_conn = None
-        self.current_state = False  # False=OFF, True=ON
-        self.last_person_detected_time = None
-        self.last_state_change_time = time.time()
+        self.current_state = False          # False=OFF, True=ON
+        self.last_person_time = None
         self.control_count = 0
 
-        print(f"🔌 Modbus 포트 초기화: {port} ({baudrate} baud)")
-
     def connect(self):
-        """Modbus 연결"""
+        """Modbus 직렬 연결"""
         try:
             self.serial_conn = serial.Serial(
-                port=self.port,
-                baudrate=self.baudrate,
+                port=MODBUS_PORT,
+                baudrate=MODBUS_BAUD,
                 bytesize=serial.EIGHTBITS,
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
                 timeout=2
             )
-            print("✓ Modbus 연결 완료\n")
+            print(f"✓ Modbus 연결 완료: {MODBUS_PORT}")
             return True
         except serial.SerialException as e:
             print(f"❌ Modbus 연결 오류: {e}")
-            print("   - USB-RS485 어댑터가 연결되어 있는지 확인하세요")
-            print("   - 포트 설정을 확인하세요: /dev/ttyUSB0 또는 /dev/ttyUSB1")
+            print("   USB-RS485 어댑터 연결 확인: /dev/ttyUSB0 또는 /dev/ttyUSB1")
             return False
 
     def calculate_crc(self, data):
-        """Modbus CRC-16 계산"""
+        """Modbus CRC-16"""
         crc = 0xFFFF
         for byte in data:
             crc ^= byte
@@ -77,160 +65,109 @@ class AircondController:
         return crc
 
     def write_coil(self, coil_address, value):
-        """
-        Modbus Function 5: Write Single Coil
-        에어컨 ON/OFF 제어
-        """
+        """Modbus FC5: Write Single Coil → LED ON/OFF"""
         if not self.serial_conn or not self.serial_conn.is_open:
             print("❌ Modbus 연결 없음")
             return False
 
-        # 프레임 생성
         frame = bytearray([
             SLAVE_ID,
-            0x05,  # Function 5: Write Single Coil
+            0x05,
             0x00,
             coil_address & 0xFF,
             0xFF if value else 0x00,
             0x00
         ])
-
-        # CRC 계산
         crc = self.calculate_crc(frame)
         frame.append(crc & 0xFF)
         frame.append((crc >> 8) & 0xFF)
 
-        # 전송
         try:
             self.serial_conn.write(bytes(frame))
             self.serial_conn.flush()
-            print(f"📤 Modbus 제어 전송: Coil {coil_address} = {value}")
-            self.log_control(value)
+            state_str = "ON" if value else "OFF"
+            print(f"송신: {' '.join(f'{b:02X}' for b in frame)}")
+            print(f"→ LED {state_str} (에어컨 {'가동' if value else '정지'})")
+            self._log(value)
             self.current_state = value
-            self.last_state_change_time = time.time()
+            self.control_count += 1
             return True
         except serial.SerialException as e:
-            print(f"❌ Modbus 전송 오류: {e}")
+            print(f"❌ 전송 오류: {e}")
             return False
 
-    def set_aircond(self, turn_on):
-        """에어컨 ON/OFF"""
+    def set_led(self, turn_on):
+        """LED ON/OFF (상태 변경 시에만 전송)"""
         if turn_on == self.current_state:
-            return  # 이미 같은 상태
+            return
+        self.write_coil(LED_COIL_ADDRESS, turn_on)
 
-        action = "ON" if turn_on else "OFF"
-        print(f"\n🌡️ 에어컨 {action} 명령...")
-        self.write_coil(AIRCOND_COIL_ADDRESS, turn_on)
-
-    def update_person_detection(self, person_detected):
+    def update(self, person_detected):
         """
-        사람 감지 상태 업데이트
+        YOLO 감지 결과 업데이트
+        - person_detected=True  → LED ON
+        - person_detected=False → 300초 후 LED OFF
         """
         if person_detected:
-            self.last_person_detected_time = time.time()
-            # 에어컨 켜기
+            self.last_person_time = time.time()
             if not self.current_state:
-                print("👤 사람 감지됨 → 에어컨 ON")
-                self.set_aircond(True)
+                print("사람 감지 → LED ON")
+                self.set_led(True)
         else:
-            # 사람이 감지되지 않았을 때
-            if self.last_person_detected_time is None:
+            if self.last_person_time is None:
                 return
+            elapsed = time.time() - self.last_person_time
+            remaining = NO_PERSON_TIMEOUT - elapsed
+            if remaining > 0:
+                print(f"사람 없음 ({elapsed:.0f}초 경과, {remaining:.0f}초 후 OFF)")
+            else:
+                print(f"사람 없음 {NO_PERSON_TIMEOUT}초 초과 → LED OFF")
+                self.set_led(False)
+                self.last_person_time = None
 
-            elapsed = time.time() - self.last_person_detected_time
-            if elapsed > NO_PERSON_TIMEOUT:
-                # 타임아웃 초과 → 에어컨 끄기
-                print(f"👤 {NO_PERSON_TIMEOUT}초 동안 사람 미감지 → 에어컨 OFF")
-                self.set_aircond(False)
-                self.last_person_detected_time = None
-
-    def log_control(self, state):
-        """제어 결과 로깅"""
-        self.control_count += 1
+    def _log(self, state):
+        """제어 로그 저장"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_file = f"{LOG_DIR}/aircond_control_log.txt"
-
-        status = "ON" if state else "OFF"
+        log_file = os.path.join(LOG_DIR, 'led_control.log')
         with open(log_file, 'a') as f:
-            f.write(f"[{timestamp}] Aircon {status} | Control #{self.control_count}\n")
+            f.write(f"[{timestamp}] LED {'ON' if state else 'OFF'} | #{self.control_count + 1}\n")
 
     def close(self):
-        """연결 종료"""
         if self.serial_conn and self.serial_conn.is_open:
             self.serial_conn.close()
-            print("\nModbus 연결 종료")
+            print("Modbus 연결 종료")
 
 
-def simulate_detection():
-    """
-    감지 시뮬레이션 (테스트용)
-    실제로는 camera_detection.py와 통합됨
-    """
+def main():
+    """camera_detection.py 와 통합 실행용 메인"""
     print("\n========================================")
-    print("  YOLO + Modbus 에어컨 제어 (시뮬레이션)")
+    print("  YOLO → Modbus LED 제어")
+    print("========================================")
+    print(f"포트: {MODBUS_PORT}  Slave ID: {SLAVE_ID}")
+    print(f"OFF 타임아웃: {NO_PERSON_TIMEOUT}초")
     print("========================================\n")
 
-    controller = AircondController()
+    controller = LEDController()
 
-    # Modbus 연결 (USB-RS485 어댑터 필요)
-    # connect() 호출 시 어댑터가 없으면 실패함
-    # if not controller.connect():
-    #     print("⚠️  Modbus 연결 실패 - 시뮬레이션만 진행합니다\n")
+    if not controller.connect():
+        print("⚠️  연결 실패 - USB-RS485 어댑터 확인 후 재시작")
+        sys.exit(1)
 
-    print("시뮬레이션: 감지 상태 변화\n")
-
+    # camera_detection.py 에서 stdin으로 "PERSON" / "EMPTY" 수신
+    print("camera_detection.py 출력 대기 중 (stdin)...\n")
     try:
-        # 시나리오 1: 사람 감지
-        print("[시나리오 1] 사람 감지 → 에어컨 ON")
-        controller.update_person_detection(True)
-        time.sleep(2)
-
-        # 시나리오 2: 사람 계속 감지
-        print("\n[시나리오 2] 사람 계속 감지")
-        controller.update_person_detection(True)
-        time.sleep(2)
-
-        # 시나리오 3: 사람 미감지 시작
-        print("\n[시나리오 3] 사람 미감지 (20초 동안)")
-        for i in range(20):
-            controller.update_person_detection(False)
-            print(f"  {i+1}초...")
-            time.sleep(1)
-
-        # 시나리오 4: 타임아웃 도달
-        print("\n[시나리오 4] 타임아웃 도달 → 에어컨 OFF")
-        print(f"  (실제 타임아웃: {NO_PERSON_TIMEOUT}초)\n")
-
-        print("========================================")
-        print(f"총 제어 횟수: {controller.control_count}회")
-        print(f"로그 저장: {LOG_DIR}/aircond_control_log.txt")
-        print("========================================\n")
-
+        for line in sys.stdin:
+            line = line.strip()
+            if line == "PERSON":
+                controller.update(True)
+            elif line == "EMPTY":
+                controller.update(False)
     except KeyboardInterrupt:
-        print("\n\n프로그램 종료 (Ctrl+C)")
+        print("\n종료 (Ctrl+C)")
     finally:
         controller.close()
-
-
-def main_with_camera():
-    """
-    실제 카메라 + YOLO 감지와 통합
-    (나중에 camera_detection.py와 함께 실행)
-    """
-    print("\n========================================")
-    print("  USB 카메라 + YOLO + Modbus 통합")
-    print("========================================\n")
-
-    print("이 스크립트는 camera_detection.py와 함께 사용됩니다.")
-    print("\n사용 예시:")
-    print("python camera_detection.py | python modbus_controller.py")
-    print("\n또는 통합 스크립트를 작성하여 함께 실행하세요.\n")
+        print(f"총 제어 횟수: {controller.control_count}회")
 
 
 if __name__ == "__main__":
-    # 시뮬레이션 모드로 실행
-    # (실제 카메라가 없을 때도 테스트 가능)
-    simulate_detection()
-
-    # 실제 카메라 + YOLO 통합은 나중에:
-    # main_with_camera()
+    main()
