@@ -254,3 +254,7 @@ pesco-jungju/
 | 객체 감지 | [Ultralytics YOLOv8](https://github.com/ultralytics/ultralytics) | 실시간 사람(class 0) 감지 |
 | 수치 연산 | [NumPy](https://numpy.org/) | 프레임 배열 처리, 텍스처 버퍼 변환 |
 | 패키지 관리 | [uv](https://github.com/astral-sh/uv) | 가상환경 및 의존성 관리 |
+
+유튜브 동영상 
+
+https://youtu.be/jXBWLOkaaTE
