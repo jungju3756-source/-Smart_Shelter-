@@ -1,0 +1,12 @@
+[project]
+name = "pesco-jungju"
+version = "0.1.0"
+description = "3D Office Simulator with PLC, Air Conditioner, and USB Camera YOLO detection"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "panda3d>=1.10.13",
+    "opencv-python>=4.8.0",
+    "ultralytics>=8.0.0",
+    "numpy>=1.24.0",
+]
