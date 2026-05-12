@@ -224,4 +224,6 @@ https://youtu.be/RjhoDST6DNs
 
 https://youtube.com/shorts/tkznc4FRhSg?feature=share
 
+https://youtu.be/iwpBAdmpT7U
+
 프로젝트 시작일: 2026년 3월 22일
